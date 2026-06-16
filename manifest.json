@@ -1,0 +1,81 @@
+{
+  "name": "老地方 — 老友線上聚會",
+  "short_name": "老地方",
+  "description": "深夜的老友線上聚會，天燈、泡泡、備忘錄、回憶時光牆",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0d0a05",
+  "theme_color": "#1a1008",
+  "orientation": "any",
+  "lang": "zh-TW",
+  "scope": "./",
+  "categories": ["social", "entertainment"],
+  "icons": [
+    {
+      "src": "icons/icon-72.png",
+      "sizes": "72x72",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-96.png",
+      "sizes": "96x96",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-128.png",
+      "sizes": "128x128",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-144.png",
+      "sizes": "144x144",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-152.png",
+      "sizes": "152x152",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-384.png",
+      "sizes": "384x384",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "發射泡泡",
+      "short_name": "泡泡",
+      "description": "快速發射泡泡到大螢幕",
+      "url": "./index.html#bubble",
+      "icons": [{ "src": "icons/icon-96.png", "sizes": "96x96" }]
+    },
+    {
+      "name": "放飛天燈",
+      "short_name": "天燈",
+      "description": "寫下心願放飛天燈",
+      "url": "./index.html#lantern",
+      "icons": [{ "src": "icons/icon-96.png", "sizes": "96x96" }]
+    }
+  ],
+  "screenshots": [],
+  "prefer_related_applications": false
+}

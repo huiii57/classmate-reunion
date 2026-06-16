@@ -1,0 +1,2094 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#1a1008" />
+  <meta name="description" content="老友線上聚會 — 深夜的老地方" />
+  <title>老友線上聚會 ✦ 深夜的老地方</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+
+  <!-- ============================================================
+       🔥 FIREBASE 設定區塊（請將下方替換成你的 Firebase 專案設定）
+       步驟：Firebase Console → 你的專案 → ⚙️ 專案設定 → 一般 → 你的應用程式 → 複製 firebaseConfig
+       ============================================================ -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy, where, getDocs, setDoc, getDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    // ⬇⬇⬇ 請將以下替換成你自己的 Firebase Config ⬇⬇⬇
+    const firebaseConfig = {
+      apiKey: "AIzaSyBBJBpm2ZX65TMsnhYrTL0VlXWU-enR6jw",
+      authDomain: "classmate-reunion.firebaseapp.com",
+      projectId: "classmate-reunion",
+      storageBucket: "classmate-reunion.firebasestorage.app",
+      messagingSenderId: "39769604127",
+      appId: "1:39769604127:web:5220ebf212e6ddf117952a",
+      measurementId: "G-GXZ0X1XP53"
+    };
+    // ⬆⬆⬆ 設定到這裡結束 ⬆⬆⬆
+
+    // ============================================================
+    // 🔑 管理員密碼設定區塊
+    //
+    // 預設管理員密碼為：admin1234
+    // 如果你想改密碼，請用以下方式取得新密碼的 SHA-256 雜湊值：
+    //   方法一：開啟瀏覽器 Console，貼上以下程式碼：
+    //     crypto.subtle.digest('SHA-256', new TextEncoder().encode('你的新密碼'))
+    //       .then(b => console.log([...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')))
+    //   方法二：前往 https://emn178.github.io/online-tools/sha256.html 輸入密碼取得雜湊值
+    //
+    // 把取得的 64 字元雜湊字串貼到下方引號內取代，即完成密碼修改。
+    // ⚠️ 注意：這份雜湊值寫在前端是公開的，請勿設定會用於其他服務的重要密碼。
+    // ============================================================
+    const ADMIN_PIN_HASH = "6e9b87ecee9fc797e5f5ce79edd7f5b5a8e13e1c0fb1dc12d44e35c27d3f00b3";
+    //                      ↑ 上方為 "admin1234" 的 SHA-256 雜湊，請自行替換成你想要的密碼雜湊
+
+    // 管理員身份狀態（驗證通過後設為 true，存入 sessionStorage 避免重整就要重新輸入）
+    let adminVerified = false;
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // ── 全域狀態 ──────────────────────────────────────────────
+    let currentSessionId = null;
+    let currentScene = "campfire"; // campfire | greenhouse | rainwindow
+    let bubbleCount = 0;
+    let lanternCount = 0;
+    let sessionListeners = []; // 存放 unsubscribe 函數
+    let doorOpen = false;
+
+    // ── SHA-256 雜湊函數（瀏覽器原生 Web Crypto API）────────
+    async function sha256(message) {
+      const msgBuffer = new TextEncoder().encode(message);
+      const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    // ── 惡意代碼過濾 ──────────────────────────────────────────
+    function sanitize(text) {
+      return text
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/javascript:/gi, "")
+        .replace(/on\w+=/gi, "");
+    }
+
+    // ── 自動轉換網址為超連結 ──────────────────────────────────
+    function linkify(text) {
+      const safe = sanitize(text);
+      return safe.replace(/(https?:\/\/[^\s<>"']+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【場次管理】
+    // ══════════════════════════════════════════════════════════
+
+    async function loadSessions() {
+      const q = query(collection(db, "sessions"), orderBy("createdAt", "desc"));
+      const snap = await getDocs(q);
+      const sessions = [];
+      snap.forEach(d => sessions.push({ id: d.id, ...d.data() }));
+      renderSessionList(sessions);
+      if (sessions.length > 0) {
+        // 預設載入最新場次
+        await switchSession(sessions[0].id);
+      } else {
+        // 沒有場次時，管理員可建立
+        document.getElementById("no-session-msg").style.display = "block";
+      }
+    }
+
+    function renderSessionList(sessions) {
+      const sel = document.getElementById("session-select");
+      sel.innerHTML = "";
+      sessions.forEach(s => {
+        const opt = document.createElement("option");
+        opt.value = s.id;
+        opt.textContent = s.name || s.id;
+        sel.appendChild(opt);
+      });
+    }
+
+    async function switchSession(sessionId) {
+      // 取消舊監聽
+      sessionListeners.forEach(unsub => unsub());
+      sessionListeners = [];
+
+      currentSessionId = sessionId;
+
+      // 更新下拉選單
+      const sel = document.getElementById("session-select");
+      if (sel) sel.value = sessionId;
+
+      // 取得場次資料
+      const sessionDoc = await getDoc(doc(db, "sessions", sessionId));
+      if (sessionDoc.exists()) {
+        const sData = sessionDoc.data();
+        currentScene = sData.defaultScene || "campfire";
+        applyScene(currentScene);
+      }
+
+      // 開始監聽各區塊
+      listenMemos();
+      listenWall();
+
+      // 動畫：場景切換閃爍
+      document.getElementById("main-content").classList.add("scene-transition");
+      setTimeout(() => {
+        document.getElementById("main-content").classList.remove("scene-transition");
+      }, 500);
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【場景切換】
+    // ══════════════════════════════════════════════════════════
+
+    function applyScene(scene) {
+      currentScene = scene;
+      const stage = document.getElementById("sky-stage");
+      stage.className = "sky-stage scene-" + scene;
+
+      // 更新管理選單 radio
+      const radios = document.querySelectorAll('input[name="scene-radio"]');
+      radios.forEach(r => { r.checked = (r.value === scene); });
+
+      // 依場景顯示/隱藏動畫元素
+      document.getElementById("campfire-container").style.display = scene === "campfire" ? "flex" : "none";
+      document.getElementById("greenhouse-lights").style.display = scene === "greenhouse" ? "block" : "none";
+      document.getElementById("rain-container").style.display = scene === "rainwindow" ? "block" : "none";
+    }
+
+    async function changeScene(scene) {
+      applyScene(scene);
+      // 如果是管理員，更新資料庫
+      if (currentSessionId && isAdmin()) {
+        await updateDoc(doc(db, "sessions", currentSessionId), { defaultScene: scene });
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【漂浮泡泡 🫧】
+    // ══════════════════════════════════════════════════════════
+
+    function launchBubble() {
+      if (bubbleCount >= 100) return;
+      bubbleCount++;
+      updateBubbleBtn();
+
+      const container = document.getElementById("bubble-container");
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+
+      const size = 20 + Math.random() * 50;
+      const startX = Math.random() * (container.offsetWidth - size);
+      const driftX = (Math.random() - 0.5) * 200;
+      const duration = 4000 + Math.random() * 4000;
+
+      bubble.style.cssText = `
+        width: ${size}px;
+        height: ${size}px;
+        left: ${startX}px;
+        bottom: 0;
+        --drift-x: ${driftX}px;
+        animation-duration: ${duration}ms;
+      `;
+
+      container.appendChild(bubble);
+
+      setTimeout(() => {
+        bubble.remove();
+        bubbleCount--;
+        updateBubbleBtn();
+      }, duration);
+    }
+
+    function updateBubbleBtn() {
+      const btn = document.getElementById("bubble-btn");
+      if (!btn) return;
+      if (bubbleCount >= 100) {
+        btn.disabled = true;
+        btn.textContent = "🫧 泡泡已滿";
+      } else {
+        btn.disabled = false;
+        btn.textContent = "🫧 發射泡泡";
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【深夜天燈 🏮】
+    // ══════════════════════════════════════════════════════════
+
+    function launchLantern() {
+      if (lanternCount >= 30) {
+        alert("天燈已達上限 30 盞，請稍後再試！");
+        return;
+      }
+
+      const name = document.getElementById("lantern-name").value.trim().slice(0, 10);
+      const content = document.getElementById("lantern-content").value.trim().slice(0, 30);
+
+      if (!name || !content) {
+        alert("請填寫名字與天燈內容！");
+        return;
+      }
+
+      lanternCount++;
+
+      const container = document.getElementById("lantern-container");
+      const lantern = document.createElement("div");
+      lantern.className = "lantern";
+
+      const startX = 10 + Math.random() * 70;
+      const driftX = (Math.random() - 0.5) * 150;
+
+      lantern.innerHTML = `
+        <div class="lantern-body">
+          <div class="lantern-glow"></div>
+          <div class="lantern-text">
+            <span class="lantern-name">${sanitize(name)}</span>
+            <span class="lantern-msg">${sanitize(content)}</span>
+          </div>
+        </div>
+      `;
+
+      lantern.style.cssText = `
+        left: ${startX}%;
+        --drift-x: ${driftX}px;
+      `;
+
+      container.appendChild(lantern);
+
+      document.getElementById("lantern-name").value = "";
+      document.getElementById("lantern-content").value = "";
+
+      setTimeout(() => {
+        lantern.remove();
+        lanternCount--;
+      }, 10000);
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【備忘錄 — Firestore 即時監聽】
+    // ══════════════════════════════════════════════════════════
+
+    function listenMemos() {
+      if (!currentSessionId) return;
+      const q = query(
+        collection(db, "sessions", currentSessionId, "memos"),
+        orderBy("createdAt", "asc")
+      );
+      const unsub = onSnapshot(q, (snap) => {
+        const list = document.getElementById("memo-list");
+        list.innerHTML = "";
+        snap.forEach(d => {
+          const data = d.data();
+          const item = document.createElement("div");
+          item.className = "memo-item";
+          item.dataset.id = d.id;
+          item.innerHTML = `
+            <div class="memo-header">
+              <span class="memo-author">📌 ${sanitize(data.name)}</span>
+              <span class="memo-time">${data.createdAt ? new Date(data.createdAt.toDate()).toLocaleString("zh-TW") : ""}</span>
+            </div>
+            <div class="memo-body">${linkify(data.content)}</div>
+            <div class="memo-actions">
+              <button class="btn-sm btn-edit-memo" data-id="${d.id}" data-name="${sanitize(data.name)}">✏️ 修改</button>
+              <button class="btn-sm btn-del-memo" data-id="${d.id}" data-name="${sanitize(data.name)}">🗑️ 刪除</button>
+            </div>
+          `;
+          list.appendChild(item);
+        });
+
+        // 綁定按鈕事件
+        document.querySelectorAll(".btn-edit-memo").forEach(btn => {
+          btn.onclick = () => editMemo(btn.dataset.id, btn.dataset.name);
+        });
+        document.querySelectorAll(".btn-del-memo").forEach(btn => {
+          btn.onclick = () => deleteMemo(btn.dataset.id, btn.dataset.name);
+        });
+      });
+      sessionListeners.push(unsub);
+    }
+
+    async function submitMemo() {
+      const name = document.getElementById("memo-name").value.trim();
+      const pin = document.getElementById("memo-pin").value.trim();
+      const content = document.getElementById("memo-content").value.trim();
+
+      if (!name || !pin || !content) { alert("請填寫名字、PIN碼與內容！"); return; }
+      if (pin.length !== 4 || !/^\d{4}$/.test(pin)) { alert("PIN碼必須是4位數字！"); return; }
+      if (!currentSessionId) { alert("尚未載入場次！"); return; }
+
+      const pinHash = await sha256(pin);
+
+      await addDoc(collection(db, "sessions", currentSessionId, "memos"), {
+        name,
+        pinHash,
+        content,
+        createdAt: serverTimestamp()
+      });
+
+      document.getElementById("memo-name").value = "";
+      document.getElementById("memo-pin").value = "";
+      document.getElementById("memo-content").value = "";
+      alert("✅ 備忘錄新增成功！");
+    }
+
+    async function editMemo(id, authorName) {
+      const pin = prompt(`請輸入 ${authorName} 的 4 位數 PIN 碼來修改：`);
+      if (!pin) return;
+      const pinHash = await sha256(pin);
+
+      const memoRef = doc(db, "sessions", currentSessionId, "memos", id);
+      const memoSnap = await getDoc(memoRef);
+      if (!memoSnap.exists() || memoSnap.data().pinHash !== pinHash) {
+        alert("❌ PIN碼錯誤，無法修改！");
+        return;
+      }
+
+      const newContent = prompt("請輸入新的內容：", memoSnap.data().content);
+      if (newContent === null) return;
+
+      await updateDoc(memoRef, { content: newContent });
+      alert("✅ 修改成功！");
+    }
+
+    async function deleteMemo(id, authorName) {
+      const pin = prompt(`請輸入 ${authorName} 的 4 位數 PIN 碼來刪除：`);
+      if (!pin) return;
+      const pinHash = await sha256(pin);
+
+      const memoRef = doc(db, "sessions", currentSessionId, "memos", id);
+      const memoSnap = await getDoc(memoRef);
+      if (!memoSnap.exists() || memoSnap.data().pinHash !== pinHash) {
+        alert("❌ PIN碼錯誤，無法刪除！");
+        return;
+      }
+
+      if (!confirm("確定要刪除這則備忘錄嗎？")) return;
+      await deleteDoc(memoRef);
+      alert("✅ 刪除成功！");
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【回憶時光牆 — Firestore 即時監聽】
+    // ══════════════════════════════════════════════════════════
+
+    function listenWall() {
+      if (!currentSessionId) return;
+      const q = query(
+        collection(db, "sessions", currentSessionId, "wall"),
+        orderBy("createdAt", "desc")
+      );
+      const unsub = onSnapshot(q, (snap) => {
+        const grid = document.getElementById("wall-grid");
+        grid.innerHTML = "";
+        snap.forEach(d => {
+          const data = d.data();
+          const rotation = (Math.random() * 8 - 4).toFixed(2);
+          const card = document.createElement("div");
+          card.className = "polaroid";
+          card.style.transform = `rotate(${rotation}deg)`;
+
+          const imgHtml = data.photoUrl
+            ? `<div class="polaroid-photo"><img src="${sanitize(data.photoUrl)}" alt="回憶照片" loading="lazy" onerror="this.parentElement.style.display='none'" /></div>`
+            : `<div class="polaroid-photo polaroid-no-photo">📷</div>`;
+
+          card.innerHTML = `
+            ${imgHtml}
+            <div class="polaroid-caption">
+              <p class="polaroid-text">${sanitize(data.content)}</p>
+              <p class="polaroid-author">— ${sanitize(data.name)}</p>
+              <p class="polaroid-date">${data.createdAt ? new Date(data.createdAt.toDate()).toLocaleDateString("zh-TW") : ""}</p>
+              <div class="polaroid-actions">
+                <button class="btn-sm btn-edit-wall" data-id="${d.id}" data-name="${sanitize(data.name)}">✏️</button>
+                <button class="btn-sm btn-del-wall" data-id="${d.id}" data-name="${sanitize(data.name)}">🗑️</button>
+              </div>
+            </div>
+          `;
+          grid.appendChild(card);
+        });
+
+        document.querySelectorAll(".btn-edit-wall").forEach(btn => {
+          btn.onclick = () => editWall(btn.dataset.id, btn.dataset.name);
+        });
+        document.querySelectorAll(".btn-del-wall").forEach(btn => {
+          btn.onclick = () => deleteWall(btn.dataset.id, btn.dataset.name);
+        });
+      });
+      sessionListeners.push(unsub);
+    }
+
+    async function submitWall() {
+      const name = document.getElementById("wall-name").value.trim();
+      const pin = document.getElementById("wall-pin").value.trim();
+      const content = document.getElementById("wall-content").value.trim();
+      const photoUrl = document.getElementById("wall-photo").value.trim();
+
+      if (!name || !pin || !content) { alert("請填寫名字、PIN碼與內容！"); return; }
+      if (pin.length !== 4 || !/^\d{4}$/.test(pin)) { alert("PIN碼必須是4位數字！"); return; }
+      if (!currentSessionId) { alert("尚未載入場次！"); return; }
+
+      const pinHash = await sha256(pin);
+
+      await addDoc(collection(db, "sessions", currentSessionId, "wall"), {
+        name, pinHash, content,
+        photoUrl: photoUrl || "",
+        createdAt: serverTimestamp()
+      });
+
+      document.getElementById("wall-name").value = "";
+      document.getElementById("wall-pin").value = "";
+      document.getElementById("wall-content").value = "";
+      document.getElementById("wall-photo").value = "";
+      alert("✅ 回憶新增成功！");
+    }
+
+    async function editWall(id, authorName) {
+      const pin = prompt(`請輸入 ${authorName} 的 PIN 碼：`);
+      if (!pin) return;
+      const pinHash = await sha256(pin);
+
+      const ref = doc(db, "sessions", currentSessionId, "wall", id);
+      const snap = await getDoc(ref);
+      if (!snap.exists() || snap.data().pinHash !== pinHash) {
+        alert("❌ PIN碼錯誤！");
+        return;
+      }
+
+      const newContent = prompt("請輸入新的文字內容：", snap.data().content);
+      if (newContent === null) return;
+      const newPhoto = prompt("請輸入新的照片網址（留空保持不變）：", snap.data().photoUrl || "");
+
+      const updates = { content: newContent };
+      if (newPhoto !== null) updates.photoUrl = newPhoto;
+      await updateDoc(ref, updates);
+      alert("✅ 修改成功！");
+    }
+
+    async function deleteWall(id, authorName) {
+      const pin = prompt(`請輸入 ${authorName} 的 PIN 碼來刪除：`);
+      if (!pin) return;
+      const pinHash = await sha256(pin);
+
+      const ref = doc(db, "sessions", currentSessionId, "wall", id);
+      const snap = await getDoc(ref);
+      if (!snap.exists() || snap.data().pinHash !== pinHash) {
+        alert("❌ PIN碼錯誤！");
+        return;
+      }
+
+      if (!confirm("確定刪除這張回憶嗎？")) return;
+      await deleteDoc(ref);
+      alert("✅ 刪除成功！");
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【管理員功能】
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * 回傳目前是否已通過管理員驗證。
+     * 單純查狀態，不觸發驗證流程。
+     */
+    function isAdmin() {
+      return adminVerified;
+    }
+
+    /**
+     * 驗證管理員密碼。
+     * 僅在偵測到 ?role=admin 時由 DOMContentLoaded 呼叫一次。
+     * 驗證成功：設 adminVerified = true，並顯示管理員 UI。
+     * 驗證失敗：最多允許 3 次，超過後移除網址參數、拒絕進入。
+     */
+    async function verifyAdminPin() {
+      // 先檢查本次 session 是否已驗證過（重整不用重輸）
+      if (sessionStorage.getItem("admin_verified") === "true") {
+        adminVerified = true;
+        return true;
+      }
+
+      let attempts = 0;
+      const MAX_ATTEMPTS = 3;
+
+      while (attempts < MAX_ATTEMPTS) {
+        const input = prompt(
+          `🔑 管理員驗證（第 ${attempts + 1}/${MAX_ATTEMPTS} 次）\n請輸入管理員密碼：`
+        );
+
+        // 使用者按了取消
+        if (input === null) {
+          alert("❌ 已取消管理員登入。");
+          removeAdminParam();
+          return false;
+        }
+
+        const inputHash = await sha256(input.trim());
+
+        if (inputHash === ADMIN_PIN_HASH) {
+          adminVerified = true;
+          sessionStorage.setItem("admin_verified", "true");
+          alert("✅ 管理員驗證成功！歡迎回來。");
+          return true;
+        }
+
+        attempts++;
+        if (attempts < MAX_ATTEMPTS) {
+          alert(`❌ 密碼錯誤，還剩 ${MAX_ATTEMPTS - attempts} 次機會。`);
+        }
+      }
+
+      // 超過次數
+      alert("❌ 密碼錯誤次數過多，已取消管理員模式。");
+      removeAdminParam();
+      return false;
+    }
+
+    /** 將網址上的 ?role=admin 移除，避免畫面一直顯示管理員提示 */
+    function removeAdminParam() {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("role");
+      window.history.replaceState({}, "", url.toString());
+    }
+
+    async function createSession() {
+      const name = document.getElementById("new-session-name").value.trim();
+      const scene = document.getElementById("new-session-scene").value;
+      if (!name) { alert("請輸入場次名稱！"); return; }
+
+      const id = "session_" + Date.now();
+      await setDoc(doc(db, "sessions", id), {
+        name,
+        defaultScene: scene,
+        createdAt: serverTimestamp()
+      });
+
+      document.getElementById("new-session-name").value = "";
+      alert(`✅ 場次「${name}」建立成功！`);
+      await loadSessions();
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【石門動畫】
+    // ══════════════════════════════════════════════════════════
+
+    function toggleDoor() {
+      const door = document.getElementById("stone-door");
+      doorOpen = !doorOpen;
+      door.classList.toggle("door-open", doorOpen);
+      document.getElementById("basement-menu").style.display = doorOpen ? "block" : "none";
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【雨滴動畫生成】
+    // ══════════════════════════════════════════════════════════
+
+    function generateRaindrops() {
+      const container = document.getElementById("rain-container");
+      for (let i = 0; i < 40; i++) {
+        const drop = document.createElement("div");
+        drop.className = "raindrop";
+        drop.style.cssText = `
+          left: ${Math.random() * 100}%;
+          animation-delay: ${Math.random() * 3}s;
+          animation-duration: ${0.6 + Math.random() * 0.8}s;
+          height: ${8 + Math.random() * 15}px;
+          opacity: ${0.4 + Math.random() * 0.4};
+        `;
+        container.appendChild(drop);
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【溫室串燈生成】
+    // ══════════════════════════════════════════════════════════
+
+    function generateGreenhouseLights() {
+      const container = document.getElementById("greenhouse-lights");
+      const colors = ["#ffcc44", "#ff9955", "#ffee88", "#aaffcc", "#ffaacc"];
+      for (let i = 0; i < 30; i++) {
+        const light = document.createElement("div");
+        light.className = "gh-light";
+        const color = colors[Math.floor(Math.random() * colors.length)];
+        light.style.cssText = `
+          left: ${Math.random() * 95}%;
+          top: ${5 + Math.random() * 60}%;
+          background: ${color};
+          animation-delay: ${Math.random() * 2}s;
+          animation-duration: ${1.5 + Math.random() * 2}s;
+        `;
+        container.appendChild(light);
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【手機偵測】
+    // ══════════════════════════════════════════════════════════
+
+    function detectMobile() {
+      const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || window.innerWidth < 768;
+      document.body.classList.toggle("mobile-mode", isMobile);
+      document.getElementById("desktop-stage").style.display = isMobile ? "none" : "block";
+      document.getElementById("mobile-panel").style.display = isMobile ? "block" : "none";
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 【頁面初始化】
+    // ══════════════════════════════════════════════════════════
+
+    document.addEventListener("DOMContentLoaded", async () => {
+      detectMobile();
+      window.addEventListener("resize", detectMobile);
+
+      generateRaindrops();
+      generateGreenhouseLights();
+
+      // 綁定場景按鈕
+      document.querySelectorAll('input[name="scene-radio"]').forEach(radio => {
+        radio.addEventListener("change", () => changeScene(radio.value));
+      });
+
+      // 管理員驗證流程
+      // 偵測到 ?role=admin 時，先要求輸入密碼，通過後才顯示管理面板
+      const hasAdminParam = new URLSearchParams(window.location.search).get("role") === "admin";
+      if (hasAdminParam) {
+        const passed = await verifyAdminPin();
+        if (passed) {
+          document.querySelectorAll(".admin-only").forEach(el => el.style.display = "block");
+        }
+        // 無論成功或失敗，都移除網址上的 ?role=admin（避免被截圖外洩）
+        removeAdminParam();
+      }
+
+      // 管理選單顯示切換
+      document.getElementById("admin-toggle-btn").addEventListener("click", () => {
+        const menu = document.getElementById("admin-scene-menu");
+        menu.style.display = menu.style.display === "none" ? "flex" : "none";
+      });
+
+      // 石門
+      document.getElementById("stone-door").addEventListener("click", toggleDoor);
+
+      // 場次選單切換
+      document.getElementById("session-select").addEventListener("change", (e) => {
+        switchSession(e.target.value);
+      });
+
+      // 備忘錄投稿
+      document.getElementById("submit-memo-btn").addEventListener("click", submitMemo);
+
+      // 時光牆投稿
+      document.getElementById("submit-wall-btn").addEventListener("click", submitWall);
+
+      // 天燈發射
+      document.getElementById("launch-lantern-btn").addEventListener("click", launchLantern);
+
+      // 泡泡發射（手機端與電腦端共用函數）
+      document.querySelectorAll(".bubble-launch-btn").forEach(btn => {
+        btn.addEventListener("click", launchBubble);
+      });
+
+      // 新增場次（管理員）
+      const createBtn = document.getElementById("create-session-btn");
+      if (createBtn) createBtn.addEventListener("click", createSession);
+
+      // 載入場次
+      await loadSessions();
+    });
+
+    // 將需要在 HTML onclick 用的函數掛到 window
+    window.launchBubble = launchBubble;
+    window.launchLantern = launchLantern;
+    window.submitMemo = submitMemo;
+    window.submitWall = submitWall;
+    window.toggleDoor = toggleDoor;
+    window.switchSession = switchSession;
+    window.createSession = createSession;
+
+  </script>
+
+  <style>
+    /* ═══════════════════════════════════════════════════════
+       CSS 變數 & 全域重設
+    ═══════════════════════════════════════════════════════ */
+    :root {
+      --bg-deep: #0d0a05;
+      --bg-night: #111820;
+      --warm-orange: #e8824a;
+      --warm-amber: #f5c842;
+      --forest-green: #2d5a27;
+      --moss-green: #4a7a3d;
+      --wood-brown: #5c3d1e;
+      --wood-light: #8b6340;
+      --cork: #c4956a;
+      --parchment: #f2e8d5;
+      --chalk-white: #f0ead8;
+      --stone-gray: #6b7280;
+      --stone-dark: #374151;
+      --text-primary: #f0ead8;
+      --text-dim: #a89070;
+      --shadow-warm: rgba(232, 130, 74, 0.3);
+      --font-main: "Georgia", "Times New Roman", "Noto Serif TC", serif;
+      --font-ui: "Helvetica Neue", "Arial", "Noto Sans TC", sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--font-main);
+      background: var(--bg-deep);
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* 場景過渡動畫 */
+    .scene-transition { animation: flashTransition 0.5s ease; }
+    @keyframes flashTransition {
+      0% { opacity: 1; }
+      40% { opacity: 0.3; }
+      100% { opacity: 1; }
+    }
+
+    /* ═══════════════════════════════════════════════════════
+       【第一層：魔幻星空區】
+    ═══════════════════════════════════════════════════════ */
+    .sky-stage {
+      position: relative;
+      width: 100%;
+      height: 100vh;
+      min-height: 500px;
+      overflow: hidden;
+      transition: background 1s ease;
+    }
+
+    /* 場景 1：深夜微醺營火 */
+    .sky-stage.scene-campfire {
+      background: radial-gradient(ellipse at 50% 100%, #1a0e02 0%, #0d1525 50%, #04080f 100%);
+    }
+
+    /* 場景 2：夏夜林中溫室 */
+    .sky-stage.scene-greenhouse {
+      background: radial-gradient(ellipse at 50% 60%, #0a1a0a 0%, #0d1a10 40%, #050d08 100%);
+    }
+
+    /* 場景 3：微雨天窗小屋 */
+    .sky-stage.scene-rainwindow {
+      background: radial-gradient(ellipse at 50% 0%, #1a2030 0%, #0d1020 50%, #08090d 100%);
+    }
+
+    /* ── 星星 ── */
+    .stars {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .stars::before, .stars::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image:
+        radial-gradient(1px 1px at 10% 15%, #fff 0%, transparent 100%),
+        radial-gradient(1px 1px at 25% 8%, rgba(255,255,255,0.8) 0%, transparent 100%),
+        radial-gradient(1.5px 1.5px at 40% 20%, #fff 0%, transparent 100%),
+        radial-gradient(1px 1px at 55% 5%, rgba(255,255,255,0.6) 0%, transparent 100%),
+        radial-gradient(1px 1px at 70% 12%, #fff 0%, transparent 100%),
+        radial-gradient(1.5px 1.5px at 85% 18%, rgba(255,255,255,0.9) 0%, transparent 100%),
+        radial-gradient(1px 1px at 92% 7%, #fff 0%, transparent 100%),
+        radial-gradient(1px 1px at 5% 35%, rgba(255,255,255,0.5) 0%, transparent 100%),
+        radial-gradient(1px 1px at 18% 42%, #fff 0%, transparent 100%),
+        radial-gradient(1.5px 1.5px at 33% 30%, rgba(255,255,255,0.7) 0%, transparent 100%),
+        radial-gradient(1px 1px at 48% 38%, #fff 0%, transparent 100%),
+        radial-gradient(1px 1px at 63% 28%, rgba(255,255,255,0.8) 0%, transparent 100%),
+        radial-gradient(1px 1px at 77% 35%, #fff 0%, transparent 100%),
+        radial-gradient(1.5px 1.5px at 88% 45%, rgba(255,255,255,0.6) 0%, transparent 100%),
+        radial-gradient(1px 1px at 95% 32%, #fff 0%, transparent 100%);
+      animation: starTwinkle 4s ease-in-out infinite alternate;
+    }
+    .stars::after {
+      background-image:
+        radial-gradient(1px 1px at 7% 60%, rgba(255,255,255,0.4) 0%, transparent 100%),
+        radial-gradient(1.5px 1.5px at 20% 55%, #fff 0%, transparent 100%),
+        radial-gradient(1px 1px at 37% 65%, rgba(255,255,255,0.7) 0%, transparent 100%),
+        radial-gradient(1px 1px at 52% 50%, #fff 0%, transparent 100%),
+        radial-gradient(1.5px 1.5px at 67% 58%, rgba(255,255,255,0.5) 0%, transparent 100%),
+        radial-gradient(1px 1px at 80% 62%, #fff 0%, transparent 100%),
+        radial-gradient(1px 1px at 3% 75%, rgba(255,255,255,0.6) 0%, transparent 100%),
+        radial-gradient(1.5px 1.5px at 14% 80%, #fff 0%, transparent 100%),
+        radial-gradient(1px 1px at 28% 72%, rgba(255,255,255,0.4) 0%, transparent 100%);
+      animation-delay: 2s;
+      animation-duration: 6s;
+    }
+    @keyframes starTwinkle {
+      from { opacity: 0.7; }
+      to { opacity: 1; }
+    }
+
+    /* ── 月亮 ── */
+    .moon {
+      position: absolute;
+      top: 8%;
+      right: 12%;
+      width: 60px;
+      height: 60px;
+      background: radial-gradient(circle at 35% 35%, #fffbe8, #f5d97a);
+      border-radius: 50%;
+      box-shadow: 0 0 20px rgba(245, 217, 122, 0.5), 0 0 60px rgba(245, 217, 122, 0.2);
+      animation: moonGlow 8s ease-in-out infinite alternate;
+    }
+    @keyframes moonGlow {
+      from { box-shadow: 0 0 20px rgba(245, 217, 122, 0.5), 0 0 60px rgba(245, 217, 122, 0.2); }
+      to { box-shadow: 0 0 30px rgba(245, 217, 122, 0.7), 0 0 80px rgba(245, 217, 122, 0.3); }
+    }
+
+    /* ── 營火 ── */
+    #campfire-container {
+      position: absolute;
+      bottom: 12%;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .campfire-glow {
+      position: absolute;
+      bottom: -10px;
+      width: 120px;
+      height: 50px;
+      background: radial-gradient(ellipse, rgba(255, 150, 50, 0.4) 0%, transparent 70%);
+      border-radius: 50%;
+      animation: glowPulse 2s ease-in-out infinite;
+    }
+    @keyframes glowPulse {
+      0%, 100% { transform: scaleX(1); opacity: 0.7; }
+      50% { transform: scaleX(1.3); opacity: 1; }
+    }
+    .fire-base {
+      display: flex;
+      gap: 4px;
+      align-items: flex-end;
+    }
+    .flame {
+      border-radius: 50% 50% 20% 20%;
+      transform-origin: bottom center;
+    }
+    .flame-main {
+      width: 40px;
+      height: 70px;
+      background: linear-gradient(to top, #ff6600, #ff9900, #ffcc00, transparent);
+      animation: flameMain 1.5s ease-in-out infinite;
+    }
+    .flame-left {
+      width: 25px;
+      height: 45px;
+      background: linear-gradient(to top, #ff4400, #ff7700, #ffaa00, transparent);
+      animation: flameLeft 1.2s ease-in-out infinite;
+      margin-right: -8px;
+    }
+    .flame-right {
+      width: 25px;
+      height: 45px;
+      background: linear-gradient(to top, #ff4400, #ff7700, #ffaa00, transparent);
+      animation: flameRight 1.8s ease-in-out infinite;
+      margin-left: -8px;
+    }
+    @keyframes flameMain {
+      0%, 100% { transform: scaleY(1) skewX(0deg); }
+      25% { transform: scaleY(1.1) skewX(3deg); }
+      75% { transform: scaleY(0.95) skewX(-3deg); }
+    }
+    @keyframes flameLeft {
+      0%, 100% { transform: scaleY(1) skewX(-5deg); }
+      50% { transform: scaleY(1.15) skewX(5deg); }
+    }
+    @keyframes flameRight {
+      0%, 100% { transform: scaleY(1) skewX(5deg); }
+      50% { transform: scaleY(0.9) skewX(-5deg); }
+    }
+    .campfire-logs {
+      width: 80px;
+      height: 16px;
+      background: linear-gradient(to right, #4a2800, #8b4513, #5c3317);
+      border-radius: 8px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+      position: relative;
+    }
+    .campfire-logs::before, .campfire-logs::after {
+      content: "";
+      position: absolute;
+      background: linear-gradient(to right, #3d2000, #7a3b0f);
+      border-radius: 6px;
+      height: 12px;
+      top: 2px;
+    }
+    .campfire-logs::before { width: 60px; left: 10px; transform: rotate(-15deg); }
+    .campfire-logs::after { width: 60px; right: 10px; transform: rotate(15deg); }
+
+    /* ── 溫室串燈 ── */
+    #greenhouse-lights {
+      position: absolute;
+      inset: 0;
+      display: none;
+    }
+    .gh-light {
+      position: absolute;
+      width: 10px;
+      height: 14px;
+      border-radius: 50% 50% 60% 60%;
+      animation: bulbBlink 2s ease-in-out infinite alternate;
+    }
+    @keyframes bulbBlink {
+      from { opacity: 0.3; box-shadow: none; }
+      to { opacity: 1; box-shadow: 0 0 12px currentColor; }
+    }
+    /* 溫室穹頂裝飾 */
+    .greenhouse-dome {
+      position: absolute;
+      bottom: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 80%;
+      max-width: 700px;
+      height: 70%;
+      border-top: 3px solid rgba(180, 220, 180, 0.3);
+      border-left: 3px solid rgba(180, 220, 180, 0.2);
+      border-right: 3px solid rgba(180, 220, 180, 0.2);
+      border-radius: 50% 50% 0 0;
+      background: linear-gradient(to bottom, rgba(20, 50, 20, 0.1), transparent);
+      display: none;
+    }
+    .scene-greenhouse .greenhouse-dome { display: block; }
+
+    /* ── 雨滴 ── */
+    #rain-container {
+      position: absolute;
+      inset: 0;
+      display: none;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .raindrop {
+      position: absolute;
+      width: 2px;
+      background: linear-gradient(to bottom, transparent, rgba(180, 200, 255, 0.7));
+      border-radius: 1px;
+      animation: rainFall linear infinite;
+      top: -20px;
+    }
+    @keyframes rainFall {
+      to { transform: translateY(105vh); }
+    }
+    /* 天窗框 */
+    .skylight-frame {
+      position: absolute;
+      top: 10%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 60%;
+      max-width: 500px;
+      height: 55%;
+      border: 4px solid rgba(100, 80, 60, 0.8);
+      border-radius: 8px;
+      background: rgba(15, 20, 35, 0.3);
+      display: none;
+      box-shadow: inset 0 0 30px rgba(0,0,0,0.5), 0 0 20px rgba(0,0,0,0.5);
+    }
+    .scene-rainwindow .skylight-frame { display: block; }
+    .skylight-frame::before, .skylight-frame::after {
+      content: "";
+      position: absolute;
+      background: rgba(100, 80, 60, 0.6);
+    }
+    .skylight-frame::before { width: 4px; height: 100%; left: 50%; top: 0; }
+    .skylight-frame::after { width: 100%; height: 4px; left: 0; top: 50%; }
+
+    /* ── 泡泡 ── */
+    #bubble-container {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .bubble {
+      position: absolute;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.6), rgba(200,230,255,0.1));
+      border: 1px solid rgba(200, 230, 255, 0.5);
+      box-shadow: inset 0 0 10px rgba(255,255,255,0.2);
+      animation: bubbleFloat linear forwards;
+    }
+    @keyframes bubbleFloat {
+      0% { transform: translate(0, 0) scale(1); opacity: 0.9; }
+      80% { opacity: 0.7; }
+      100% { transform: translate(var(--drift-x), -110vh) scale(0.8); opacity: 0; }
+    }
+
+    /* ── 天燈 ── */
+    #lantern-container {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .lantern {
+      position: absolute;
+      bottom: 15%;
+      animation: lanternRise 10s ease-out forwards;
+    }
+    @keyframes lanternRise {
+      0% { transform: translateY(0) translateX(0); opacity: 0.9; }
+      90% { opacity: 0.8; }
+      100% { transform: translateY(-95vh) translateX(var(--drift-x)); opacity: 0; }
+    }
+    .lantern-body {
+      position: relative;
+      width: 80px;
+      height: 100px;
+      background: linear-gradient(to bottom, #ff8c00, #ffaa00, #ffcc44);
+      border-radius: 40% 40% 50% 50% / 30% 30% 60% 60%;
+      box-shadow: 0 0 20px rgba(255, 170, 0, 0.7), 0 0 40px rgba(255, 140, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 12px 8px 16px;
+    }
+    .lantern-glow {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at 50% 60%, rgba(255,200,50,0.4), transparent);
+      border-radius: inherit;
+      animation: lanternGlow 2s ease-in-out infinite alternate;
+    }
+    @keyframes lanternGlow {
+      from { opacity: 0.7; }
+      to { opacity: 1; }
+    }
+    .lantern-text {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      font-family: var(--font-main);
+    }
+    .lantern-name {
+      display: block;
+      font-size: 1rem;
+      font-weight: bold;
+      color: #3a1800;
+      line-height: 1.3;
+    }
+    .lantern-msg {
+      display: block;
+      font-size: 0.85rem;
+      color: #5a2800;
+      line-height: 1.3;
+      word-break: break-all;
+    }
+
+    /* ── 標題文字 ── */
+    .stage-title {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -55%);
+      text-align: center;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .stage-title h1 {
+      font-size: clamp(2rem, 5vw, 3.5rem);
+      color: var(--chalk-white);
+      text-shadow: 0 0 30px rgba(232,130,74,0.8), 0 2px 4px rgba(0,0,0,0.8);
+      letter-spacing: 0.15em;
+      font-family: var(--font-main);
+    }
+    .stage-title p {
+      font-size: clamp(1rem, 2vw, 1.3rem);
+      color: var(--text-dim);
+      margin-top: 0.5rem;
+      letter-spacing: 0.1em;
+    }
+
+    /* ── 右上角管理選單 ── */
+    #admin-toggle-btn {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      z-index: 100;
+      background: rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: var(--text-dim);
+      padding: 8px 14px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 1rem;
+      font-family: var(--font-ui);
+      transition: all 0.2s;
+    }
+    #admin-toggle-btn:hover { color: var(--warm-orange); border-color: var(--warm-orange); }
+
+    #admin-scene-menu {
+      position: absolute;
+      top: 56px;
+      right: 16px;
+      z-index: 100;
+      background: rgba(15, 10, 5, 0.9);
+      border: 1px solid rgba(232,130,74,0.4);
+      border-radius: 12px;
+      padding: 16px;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 200px;
+      backdrop-filter: blur(8px);
+    }
+    #admin-scene-menu label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 1rem;
+      color: var(--chalk-white);
+      padding: 6px 8px;
+      border-radius: 6px;
+      transition: background 0.2s;
+    }
+    #admin-scene-menu label:hover { background: rgba(232,130,74,0.2); }
+
+    /* ── 手機端遙控器 ── */
+    #mobile-panel {
+      display: none;
+      background: linear-gradient(135deg, #1a0e05, #0d1520);
+      padding: 20px 16px;
+    }
+    .mobile-panel-title {
+      font-size: 1.3rem;
+      color: var(--warm-amber);
+      text-align: center;
+      margin-bottom: 16px;
+      letter-spacing: 0.1em;
+    }
+    .mobile-controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    /* ── 底部導覽 ── */
+    .stage-nav {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 12px;
+      z-index: 10;
+    }
+    .nav-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.3);
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+    .nav-dot:hover, .nav-dot.active { background: var(--warm-orange); transform: scale(1.3); }
+
+    /* 向下滾動提示 */
+    .scroll-hint {
+      position: absolute;
+      bottom: 60px;
+      left: 50%;
+      transform: translateX(-50%);
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 1rem;
+      animation: bounce 2s ease-in-out infinite;
+      pointer-events: none;
+      z-index: 10;
+    }
+    @keyframes bounce {
+      0%, 100% { transform: translateX(-50%) translateY(0); }
+      50% { transform: translateX(-50%) translateY(8px); }
+    }
+
+    /* ═══════════════════════════════════════════════════════
+       【共用 UI 元件】
+    ═══════════════════════════════════════════════════════ */
+    .section-wrapper {
+      width: 100%;
+      padding: 48px 24px;
+    }
+
+    .input-field {
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(200, 160, 100, 0.4);
+      border-radius: 8px;
+      color: var(--chalk-white);
+      font-family: var(--font-main);
+      font-size: 1rem;
+      padding: 10px 14px;
+      width: 100%;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .input-field:focus {
+      outline: none;
+      border-color: var(--warm-orange);
+      box-shadow: 0 0 0 3px rgba(232,130,74,0.2);
+    }
+    .input-field::placeholder { color: var(--text-dim); }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #d4622a, #e8824a);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      cursor: pointer;
+      font-family: var(--font-ui);
+      font-size: 1rem;
+      font-weight: 600;
+      padding: 12px 24px;
+      transition: all 0.2s;
+      box-shadow: 0 4px 12px rgba(232,130,74,0.3);
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(232,130,74,0.4); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .btn-sm {
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 6px;
+      color: var(--chalk-white);
+      cursor: pointer;
+      font-size: 0.9rem;
+      padding: 4px 10px;
+      transition: all 0.2s;
+    }
+    .btn-sm:hover { background: rgba(232,130,74,0.3); border-color: var(--warm-orange); }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .form-row.single { grid-template-columns: 1fr; }
+
+    .section-title {
+      font-size: clamp(1.3rem, 3vw, 2rem);
+      margin-bottom: 8px;
+      letter-spacing: 0.1em;
+    }
+    .section-subtitle {
+      font-size: 1rem;
+      color: var(--text-dim);
+      margin-bottom: 24px;
+    }
+
+    /* ═══════════════════════════════════════════════════════
+       【第二層：老地方備忘錄（木質黑板）】
+    ═══════════════════════════════════════════════════════ */
+    #memo-section {
+      background: linear-gradient(to bottom, #0d0a05, #1a100a);
+      position: relative;
+    }
+    #memo-section::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 6px;
+      background: linear-gradient(to right, var(--wood-brown), var(--wood-light), var(--wood-brown));
+    }
+
+    .memo-board {
+      background: linear-gradient(135deg, #1a2510 0%, #1c2814 50%, #182210 100%);
+      border: 8px solid var(--wood-brown);
+      border-radius: 4px;
+      padding: 28px;
+      position: relative;
+      box-shadow:
+        inset 0 0 30px rgba(0,0,0,0.4),
+        0 8px 32px rgba(0,0,0,0.6),
+        0 0 0 2px var(--wood-light);
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .memo-board::before {
+      content: "📋 老地方備忘錄";
+      position: absolute;
+      top: -20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--wood-brown);
+      color: var(--chalk-white);
+      padding: 4px 24px;
+      border-radius: 4px;
+      font-size: 1rem;
+      letter-spacing: 0.2em;
+      white-space: nowrap;
+    }
+
+    .memo-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-height: 80px;
+      margin-bottom: 24px;
+    }
+    .memo-item {
+      background: rgba(255,255,255,0.04);
+      border-left: 3px solid var(--warm-orange);
+      border-radius: 4px;
+      padding: 12px 16px;
+    }
+    .memo-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .memo-author { color: var(--warm-amber); font-size: 1rem; font-weight: bold; }
+    .memo-time { color: var(--text-dim); font-size: 0.9rem; }
+    .memo-body {
+      color: var(--chalk-white);
+      font-size: 1rem;
+      line-height: 1.7;
+      word-break: break-word;
+    }
+    .memo-body a {
+      color: #88aaff;
+      text-decoration: underline;
+    }
+    .memo-body a:hover { color: #aabbff; }
+    .memo-actions { margin-top: 8px; display: flex; gap: 8px; }
+
+    .memo-form {
+      border-top: 1px solid rgba(255,255,255,0.1);
+      padding-top: 20px;
+    }
+    .memo-form-title {
+      color: var(--chalk-white);
+      font-size: 1rem;
+      margin-bottom: 12px;
+      opacity: 0.8;
+    }
+
+    /* ═══════════════════════════════════════════════════════
+       【第三層：回憶時光牆（軟木塞板）】
+    ═══════════════════════════════════════════════════════ */
+    #wall-section {
+      background: linear-gradient(to bottom, #1a100a, #1f1508);
+      position: relative;
+    }
+
+    .wall-board {
+      background:
+        repeating-linear-gradient(
+          45deg,
+          transparent,
+          transparent 3px,
+          rgba(180,130,70,0.08) 3px,
+          rgba(180,130,70,0.08) 6px
+        ),
+        linear-gradient(135deg, #8b6534, #a07842, #8b6534);
+      border: 10px solid var(--wood-brown);
+      border-radius: 4px;
+      padding: 32px;
+      position: relative;
+      box-shadow:
+        inset 0 0 40px rgba(0,0,0,0.3),
+        0 8px 32px rgba(0,0,0,0.5);
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .wall-board::before {
+      content: "🖼️ 回憶時光牆";
+      position: absolute;
+      top: -20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--wood-brown);
+      color: var(--chalk-white);
+      padding: 4px 24px;
+      border-radius: 4px;
+      font-size: 1rem;
+      letter-spacing: 0.2em;
+      white-space: nowrap;
+    }
+
+    .wall-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 24px;
+      margin-bottom: 32px;
+      min-height: 100px;
+    }
+
+    /* 拍立得 */
+    .polaroid {
+      background: #fafaf5;
+      padding: 12px 12px 40px;
+      border-radius: 2px;
+      box-shadow:
+        3px 3px 0 rgba(0,0,0,0.2),
+        6px 6px 12px rgba(0,0,0,0.3),
+        0 0 0 1px rgba(0,0,0,0.1);
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+      /* inline transform from JS for rotation */
+    }
+    .polaroid:hover {
+      box-shadow:
+        5px 5px 0 rgba(0,0,0,0.2),
+        10px 10px 20px rgba(0,0,0,0.4),
+        0 0 0 1px rgba(0,0,0,0.1);
+    }
+    .polaroid-photo {
+      width: 100%;
+      aspect-ratio: 4/3;
+      overflow: hidden;
+      background: #e8e0d0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 8px;
+    }
+    .polaroid-photo img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .polaroid-no-photo {
+      font-size: 2.5rem;
+      color: #aaa;
+    }
+    .polaroid-caption { text-align: center; }
+    .polaroid-text {
+      font-size: 1rem;
+      color: #333;
+      font-family: var(--font-main);
+      margin-bottom: 4px;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+    .polaroid-author {
+      font-size: 0.9rem;
+      color: #666;
+      font-style: italic;
+      margin-bottom: 2px;
+    }
+    .polaroid-date {
+      font-size: 0.8rem;
+      color: #999;
+      margin-bottom: 6px;
+    }
+    .polaroid-actions { display: flex; gap: 6px; justify-content: center; }
+
+    .wall-form {
+      border-top: 2px solid rgba(0,0,0,0.15);
+      padding-top: 24px;
+      background: rgba(0,0,0,0.15);
+      border-radius: 4px;
+      padding: 20px;
+      margin-top: 16px;
+    }
+    .wall-form-title {
+      color: #3a2a10;
+      font-size: 1rem;
+      margin-bottom: 14px;
+      font-weight: bold;
+    }
+    .wall-form .input-field {
+      background: rgba(255,255,255,0.6);
+      border-color: rgba(100,70,30,0.4);
+      color: #3a2a10;
+    }
+    .wall-form .input-field::placeholder { color: #9a7a50; }
+
+    /* ═══════════════════════════════════════════════════════
+       【最底端：時光地下室入口（石門）】
+    ═══════════════════════════════════════════════════════ */
+    #basement-section {
+      background: linear-gradient(to bottom, #1f1508, #080608);
+      padding: 60px 24px 80px;
+      text-align: center;
+      position: relative;
+    }
+
+    .stone-door-wrapper {
+      display: inline-block;
+      position: relative;
+      margin: 0 auto;
+    }
+
+    #stone-door {
+      width: 180px;
+      height: 240px;
+      margin: 0 auto;
+      cursor: pointer;
+      position: relative;
+      transition: transform 0.4s ease;
+    }
+    #stone-door:hover { transform: scale(1.03); }
+
+    .door-frame {
+      width: 100%;
+      height: 100%;
+      background:
+        linear-gradient(135deg, #4a4540, #5a5550, #4a4540);
+      border-radius: 50% 50% 0 0 / 20% 20% 0 0;
+      border: 4px solid #3a3530;
+      position: relative;
+      overflow: hidden;
+      box-shadow:
+        inset 0 0 20px rgba(0,0,0,0.5),
+        0 10px 30px rgba(0,0,0,0.7);
+    }
+
+    /* 藤蔓裝飾 */
+    .vines {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .vine {
+      position: absolute;
+      width: 3px;
+      background: linear-gradient(to bottom, #2d5a1a, #4a7a2d, #2d5a1a);
+      border-radius: 2px;
+    }
+    .vine-1 { height: 80%; left: 15%; top: 5%; transform: rotate(5deg); }
+    .vine-2 { height: 60%; right: 20%; top: 15%; transform: rotate(-8deg); }
+    .vine-3 { height: 50%; left: 40%; top: 10%; transform: rotate(2deg); }
+
+    .vine-leaf {
+      position: absolute;
+      width: 14px;
+      height: 10px;
+      background: radial-gradient(ellipse, #4a9a2d, #2d6a1a);
+      border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+      transform-origin: left center;
+    }
+    .vine-1 .vine-leaf:nth-child(1) { top: 15%; left: 4px; transform: rotate(40deg); }
+    .vine-1 .vine-leaf:nth-child(2) { top: 35%; left: -10px; transform: rotate(-30deg); }
+    .vine-1 .vine-leaf:nth-child(3) { top: 55%; left: 4px; transform: rotate(50deg); }
+    .vine-2 .vine-leaf:nth-child(1) { top: 20%; right: 4px; transform: rotate(-40deg) scaleX(-1); }
+    .vine-2 .vine-leaf:nth-child(2) { top: 50%; right: -10px; transform: rotate(25deg) scaleX(-1); }
+    .vine-3 .vine-leaf:nth-child(1) { top: 30%; left: 4px; transform: rotate(35deg); }
+
+    /* 石門文字 */
+    .door-label {
+      position: absolute;
+      bottom: 30%;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200, 180, 150, 0.9);
+      font-size: 1.1rem;
+      letter-spacing: 0.3em;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+      white-space: nowrap;
+      font-family: var(--font-main);
+    }
+
+    /* 石門開啟動畫 */
+    .door-panel-left, .door-panel-right {
+      position: absolute;
+      top: 0;
+      width: 50%;
+      height: 100%;
+      background: inherit;
+      transition: transform 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+      transform-origin: left center;
+      overflow: hidden;
+    }
+    .door-panel-left {
+      left: 0;
+      transform-origin: left center;
+      background: linear-gradient(to right, #4a4540, #5a5550);
+      border-right: 2px solid #3a3530;
+    }
+    .door-panel-right {
+      right: 0;
+      transform-origin: right center;
+      background: linear-gradient(to left, #4a4540, #5a5550);
+      border-left: 2px solid #3a3530;
+    }
+
+    .door-open .door-panel-left { transform: perspective(500px) rotateY(-80deg); }
+    .door-open .door-panel-right { transform: perspective(500px) rotateY(80deg); }
+
+    /* 石門光暈 */
+    .door-inner-glow {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at 50% 70%, rgba(255, 200, 100, 0.3) 0%, transparent 70%);
+      opacity: 0;
+      transition: opacity 0.8s ease;
+    }
+    .door-open .door-inner-glow { opacity: 1; }
+
+    /* 地下室選單 */
+    #basement-menu {
+      display: none;
+      margin-top: 32px;
+      background: rgba(20, 15, 5, 0.95);
+      border: 2px solid rgba(200, 160, 100, 0.4);
+      border-radius: 12px;
+      padding: 24px;
+      max-width: 500px;
+      margin-left: auto;
+      margin-right: auto;
+      box-shadow: 0 0 40px rgba(255, 180, 50, 0.1);
+    }
+    .basement-menu-title {
+      color: var(--warm-amber);
+      font-size: 1.2rem;
+      letter-spacing: 0.2em;
+      margin-bottom: 20px;
+      text-align: center;
+    }
+    .parchment-select {
+      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23c4956a' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E") no-repeat right 12px center;
+      background-color: #2a1e0a;
+      border: 1px solid rgba(196, 149, 106, 0.5);
+      border-radius: 8px;
+      color: var(--parchment);
+      font-size: 1rem;
+      font-family: var(--font-main);
+      padding: 10px 40px 10px 14px;
+      width: 100%;
+      appearance: none;
+      cursor: pointer;
+    }
+    .parchment-select:focus { outline: none; border-color: var(--warm-amber); }
+
+    #no-session-msg {
+      display: none;
+      color: var(--text-dim);
+      font-size: 1rem;
+      text-align: center;
+      padding: 16px;
+    }
+
+    /* 管理員新增場次 */
+    .admin-only { display: none; }
+    .admin-panel {
+      margin-top: 20px;
+      padding: 16px;
+      border: 1px dashed rgba(196, 149, 106, 0.4);
+      border-radius: 8px;
+    }
+    .admin-panel-title {
+      color: var(--warm-amber);
+      font-size: 1rem;
+      margin-bottom: 12px;
+    }
+
+    /* 場次切換提示 */
+    #basement-section .section-hint {
+      color: var(--text-dim);
+      font-size: 0.9rem;
+      margin-top: 12px;
+    }
+
+    /* ═══════════════════════════════════════════════════════
+       【手機端遙控器模式】
+    ═══════════════════════════════════════════════════════ */
+    .remote-card {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(232,130,74,0.3);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .remote-card-title {
+      font-size: 1rem;
+      color: var(--warm-amber);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .remote-card .input-field { margin-bottom: 10px; }
+
+    /* ═══════════════════════════════════════════════════════
+       【RWD 響應式排版】
+    ═══════════════════════════════════════════════════════ */
+    @media (max-width: 768px) {
+      .form-row { grid-template-columns: 1fr; }
+      .wall-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+      .memo-board, .wall-board { border-width: 4px; padding: 16px; }
+      .section-wrapper { padding: 32px 16px; }
+    }
+
+    @media (min-width: 769px) {
+      #mobile-panel { display: none !important; }
+    }
+
+    /* ═══════════════════════════════════════════════════════
+       【PWA 安裝橫幅】
+    ═══════════════════════════════════════════════════════ */
+    #pwa-install-banner {
+      display: none;
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: linear-gradient(135deg, #1a0e05, #0d1520);
+      border-top: 1px solid rgba(232,130,74,0.4);
+      padding: 14px 20px;
+      flex-direction: row;
+      align-items: center;
+      gap: 12px;
+      z-index: 1000;
+      box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+    }
+    #pwa-install-banner p {
+      flex: 1;
+      color: var(--chalk-white);
+      font-size: 1rem;
+    }
+    #pwa-install-banner.show { display: flex; }
+  </style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════
+     PWA 安裝橫幅
+══════════════════════════════════════════════════ -->
+<div id="pwa-install-banner">
+  <p>📱 將「老地方」加入主畫面，隨時聚會！</p>
+  <button class="btn-primary" id="pwa-install-btn" style="white-space:nowrap;">安裝</button>
+  <button class="btn-sm" id="pwa-dismiss-btn">✕</button>
+</div>
+
+<!-- ══════════════════════════════════════════════════
+     主內容包裝
+══════════════════════════════════════════════════ -->
+<div id="main-content">
+
+  <!-- ════════════════════════════════════════════════
+       【手機端遙控器面板】（行動裝置顯示）
+  ════════════════════════════════════════════════ -->
+  <div id="mobile-panel">
+    <div class="mobile-panel-title">🌟 老地方 — 掌上遙控器</div>
+
+    <!-- 泡泡 -->
+    <div class="remote-card">
+      <div class="remote-card-title">🫧 發射泡泡</div>
+      <button id="bubble-btn" class="btn-primary bubble-launch-btn" style="width:100%;">🫧 發射泡泡</button>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-top:6px;">點擊發射一顆泡泡到大螢幕！</p>
+    </div>
+
+    <!-- 天燈 -->
+    <div class="remote-card">
+      <div class="remote-card-title">🏮 發射天燈</div>
+      <input class="input-field" id="lantern-name" placeholder="你的名字（最多10字）" maxlength="10" style="margin-bottom:8px;" />
+      <input class="input-field" id="lantern-content" placeholder="天燈心願（最多30字）" maxlength="30" style="margin-bottom:10px;" />
+      <button class="btn-primary" id="launch-lantern-btn" style="width:100%;">🏮 放飛天燈</button>
+    </div>
+
+    <!-- 備忘錄投稿 -->
+    <div class="remote-card">
+      <div class="remote-card-title">📌 貼備忘錄</div>
+      <input class="input-field" id="memo-name-m" placeholder="你的名字" style="margin-bottom:8px;" />
+      <input class="input-field" id="memo-pin-m" placeholder="4位數PIN碼" type="password" maxlength="4" pattern="\d{4}" style="margin-bottom:8px;" />
+      <textarea class="input-field" id="memo-content-m" placeholder="備忘錄內容（可貼網址）" rows="3" style="margin-bottom:10px;resize:vertical;"></textarea>
+      <button class="btn-primary" id="submit-memo-m-btn" style="width:100%;">📌 貼上去</button>
+    </div>
+
+    <!-- 時光牆投稿 -->
+    <div class="remote-card">
+      <div class="remote-card-title">🖼️ 貼時光牆</div>
+      <input class="input-field" id="wall-name-m" placeholder="你的名字" style="margin-bottom:8px;" />
+      <input class="input-field" id="wall-pin-m" placeholder="4位數PIN碼" type="password" maxlength="4" pattern="\d{4}" style="margin-bottom:8px;" />
+      <textarea class="input-field" id="wall-content-m" placeholder="寫下回憶..." rows="2" style="margin-bottom:8px;resize:vertical;"></textarea>
+      <input class="input-field" id="wall-photo-m" placeholder="照片網址（選填）" style="margin-bottom:10px;" />
+      <button class="btn-primary" id="submit-wall-m-btn" style="width:100%;">🖼️ 貼上去</button>
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════════
+       【第一層：魔幻星空區】（電腦端顯示）
+  ════════════════════════════════════════════════ -->
+  <div id="desktop-stage">
+    <div id="sky-stage" class="sky-stage scene-campfire">
+
+      <!-- 星星 -->
+      <div class="stars"></div>
+
+      <!-- 月亮 -->
+      <div class="moon"></div>
+
+      <!-- 場景裝飾 -->
+      <div class="greenhouse-dome"></div>
+      <div class="skylight-frame"></div>
+
+      <!-- 溫室串燈 -->
+      <div id="greenhouse-lights"></div>
+
+      <!-- 雨滴 -->
+      <div id="rain-container"></div>
+
+      <!-- 營火 -->
+      <div id="campfire-container">
+        <div class="campfire-glow"></div>
+        <div class="fire-base">
+          <div class="flame flame-left"></div>
+          <div class="flame flame-main"></div>
+          <div class="flame flame-right"></div>
+        </div>
+        <div class="campfire-logs"></div>
+      </div>
+
+      <!-- 泡泡容器 -->
+      <div id="bubble-container"></div>
+
+      <!-- 天燈容器 -->
+      <div id="lantern-container"></div>
+
+      <!-- 標題 -->
+      <div class="stage-title">
+        <h1>✦ 老地方 ✦</h1>
+        <p>深夜的老友聚會，從這裡開始</p>
+      </div>
+
+      <!-- 右上管理選單 -->
+      <button id="admin-toggle-btn">⚙️ 場景</button>
+      <div id="admin-scene-menu">
+        <label><input type="radio" name="scene-radio" value="campfire" checked /> 🔥 深夜微醺營火</label>
+        <label><input type="radio" name="scene-radio" value="greenhouse" /> 🌿 夏夜林中溫室</label>
+        <label><input type="radio" name="scene-radio" value="rainwindow" /> 🌧️ 微雨天窗小屋</label>
+      </div>
+
+      <!-- 電腦端泡泡按鈕 -->
+      <button class="btn-primary bubble-launch-btn" id="desktop-bubble-btn" style="position:absolute;bottom:80px;left:50%;transform:translateX(-50%);min-width:140px;">
+        🫧 發射泡泡
+      </button>
+
+      <!-- 向下提示 -->
+      <div class="scroll-hint">↓ 向下探索 ↓</div>
+
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════════
+       【第二層：老地方備忘錄】
+  ════════════════════════════════════════════════ -->
+  <section id="memo-section" class="section-wrapper">
+    <div class="memo-board">
+      <!-- 備忘錄列表（onSnapshot 即時填入） -->
+      <div class="memo-list" id="memo-list">
+        <p style="color:var(--text-dim);font-size:1rem;text-align:center;padding:20px;">黑板上還是空的，快來留言吧！</p>
+      </div>
+
+      <!-- 投稿表單 -->
+      <div class="memo-form">
+        <p class="memo-form-title">✍️ 貼上新備忘錄</p>
+        <div class="form-row">
+          <input class="input-field" id="memo-name" placeholder="你的名字" />
+          <input class="input-field" id="memo-pin" placeholder="4位數PIN碼（用於修改/刪除）" type="password" maxlength="4" pattern="\d{4}" />
+        </div>
+        <div class="form-row single">
+          <textarea class="input-field" id="memo-content" placeholder="備忘錄內容（可直接貼網址，會自動變成連結）" rows="3" style="resize:vertical;"></textarea>
+        </div>
+        <button class="btn-primary" id="submit-memo-btn">📌 貼上去</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════════════
+       【第三層：回憶時光牆】
+  ════════════════════════════════════════════════ -->
+  <section id="wall-section" class="section-wrapper">
+    <div style="max-width:1200px;margin:0 auto 24px;">
+      <h2 class="section-title" style="color:var(--warm-amber);">🖼️ 回憶時光牆</h2>
+      <p class="section-subtitle">每一張拍立得，都是一段共同的記憶</p>
+    </div>
+    <div class="wall-board">
+      <!-- 拍立得網格（onSnapshot 即時填入） -->
+      <div class="wall-grid" id="wall-grid">
+        <p style="color:#5a4030;font-size:1rem;text-align:center;padding:20px;grid-column:1/-1;">還沒有回憶，快來貼上第一張！</p>
+      </div>
+
+      <!-- 投稿表單 -->
+      <div class="wall-form">
+        <p class="wall-form-title">📸 貼上新回憶</p>
+        <div class="form-row">
+          <input class="input-field" id="wall-name" placeholder="你的名字" />
+          <input class="input-field" id="wall-pin" placeholder="4位數PIN碼" type="password" maxlength="4" pattern="\d{4}" />
+        </div>
+        <div class="form-row single">
+          <textarea class="input-field" id="wall-content" placeholder="寫下這段回憶..." rows="3" style="resize:vertical;"></textarea>
+        </div>
+        <div class="form-row single">
+          <input class="input-field" id="wall-photo" placeholder="照片網址（選填，請貼上圖片的直接連結）" />
+        </div>
+        <button class="btn-primary" id="submit-wall-btn">🖼️ 貼到牆上</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════════════
+       【最底端：時光地下室入口】
+  ════════════════════════════════════════════════ -->
+  <section id="basement-section">
+    <h2 style="color:var(--text-dim);font-size:1.2rem;letter-spacing:0.3em;margin-bottom:24px;">— 時光地下室 —</h2>
+
+    <div class="stone-door-wrapper">
+      <div id="stone-door">
+        <div class="door-frame">
+          <!-- 藤蔓 -->
+          <div class="vines">
+            <div class="vine vine-1">
+              <div class="vine-leaf"></div>
+              <div class="vine-leaf"></div>
+              <div class="vine-leaf"></div>
+            </div>
+            <div class="vine vine-2">
+              <div class="vine-leaf"></div>
+              <div class="vine-leaf"></div>
+            </div>
+            <div class="vine vine-3">
+              <div class="vine-leaf"></div>
+            </div>
+          </div>
+          <!-- 石門板 -->
+          <div class="door-panel-left"></div>
+          <div class="door-panel-right"></div>
+          <!-- 內部光暈 -->
+          <div class="door-inner-glow"></div>
+          <!-- 標籤 -->
+          <div class="door-label">時光地下室</div>
+        </div>
+      </div>
+    </div>
+
+    <p style="color:var(--text-dim);font-size:1rem;margin-top:16px;">點擊石門，進入時光迴廊</p>
+
+    <!-- 地下室選單（點擊石門後展開） -->
+    <div id="basement-menu">
+      <div class="basement-menu-title">📜 選擇聚會場次</div>
+
+      <p id="no-session-msg" style="color:var(--text-dim);font-size:1rem;padding:8px 0;">目前沒有場次，請管理員建立。</p>
+
+      <select id="session-select" class="parchment-select">
+        <option value="">— 載入中 —</option>
+      </select>
+
+      <!-- 管理員功能（需 ?role=admin） -->
+      <div class="admin-only admin-panel" style="margin-top:20px;">
+        <p class="admin-panel-title">🔑 管理員 — 建立新場次</p>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <input class="input-field" id="new-session-name" placeholder="場次名稱（如：2026-06-15 仲夏夜）" />
+          <select id="new-session-scene" class="parchment-select">
+            <option value="campfire">🔥 深夜微醺營火</option>
+            <option value="greenhouse">🌿 夏夜林中溫室</option>
+            <option value="rainwindow">🌧️ 微雨天窗小屋</option>
+          </select>
+          <button class="btn-primary" id="create-session-btn">✨ 建立場次</button>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+</div><!-- /#main-content -->
+
+<!-- ══════════════════════════════════════════════════
+     手機端備忘錄 & 時光牆投稿邏輯（與電腦端共用函數）
+══════════════════════════════════════════════════ -->
+<script type="module">
+  // 注意：這裡不能直接用上方 module 的函數，
+  // 因為 module 作用域隔離，我們透過 window 掛載的方式呼叫
+  // 但 SHA-256 需要重新定義（或透過 import）
+  // 此段用 inline 方式處理手機端表單的邏輯橋接
+
+  async function sha256(message) {
+    const msgBuffer = new TextEncoder().encode(message);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // 手機端備忘錄投稿：複製桌面端欄位後呼叫 submitMemo
+  document.getElementById("submit-memo-m-btn").addEventListener("click", async () => {
+    const nameEl = document.getElementById("memo-name");
+    const pinEl = document.getElementById("memo-pin");
+    const contentEl = document.getElementById("memo-content");
+
+    nameEl.value = document.getElementById("memo-name-m").value;
+    pinEl.value = document.getElementById("memo-pin-m").value;
+    contentEl.value = document.getElementById("memo-content-m").value;
+
+    if (window.submitMemo) {
+      await window.submitMemo();
+      document.getElementById("memo-name-m").value = "";
+      document.getElementById("memo-pin-m").value = "";
+      document.getElementById("memo-content-m").value = "";
+    }
+  });
+
+  // 手機端時光牆投稿
+  document.getElementById("submit-wall-m-btn").addEventListener("click", async () => {
+    document.getElementById("wall-name").value = document.getElementById("wall-name-m").value;
+    document.getElementById("wall-pin").value = document.getElementById("wall-pin-m").value;
+    document.getElementById("wall-content").value = document.getElementById("wall-content-m").value;
+    document.getElementById("wall-photo").value = document.getElementById("wall-photo-m").value;
+
+    if (window.submitWall) {
+      await window.submitWall();
+      document.getElementById("wall-name-m").value = "";
+      document.getElementById("wall-pin-m").value = "";
+      document.getElementById("wall-content-m").value = "";
+      document.getElementById("wall-photo-m").value = "";
+    }
+  });
+</script>
+
+<!-- PWA Service Worker 與安裝提示 -->
+<script>
+  // Service Worker 註冊
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("service-worker.js")
+        .then(reg => console.log("✅ SW 已註冊:", reg.scope))
+        .catch(err => console.warn("⚠️ SW 失敗:", err));
+    });
+  }
+
+  // PWA 安裝提示
+  let deferredPrompt = null;
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    document.getElementById("pwa-install-banner").classList.add("show");
+  });
+
+  document.getElementById("pwa-install-btn").addEventListener("click", async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    deferredPrompt = null;
+    document.getElementById("pwa-install-banner").classList.remove("show");
+  });
+
+  document.getElementById("pwa-dismiss-btn").addEventListener("click", () => {
+    document.getElementById("pwa-install-banner").classList.remove("show");
+  });
+</script>
+
+</body>
+</html>

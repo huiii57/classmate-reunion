@@ -66,7 +66,25 @@
       const hashArray = Array.from(new Uint8Array(hashBuffer));
       return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
     }
+// ── 自動將 Google Drive 分享連結轉換為可嵌入的圖片網址 ──────
+function convertDriveUrl(url) {
+  if (!url) return url;
 
+  // 格式一：/file/d/{ID}/view
+  const matchFile = url.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (matchFile) {
+    return `https://drive.google.com/thumbnail?id=${matchFile[1]}&sz=w1200`;
+  }
+
+  // 格式二：id={ID}（open?id= 或 uc?id= 舊格式）
+  const matchId = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (matchId) {
+    return `https://drive.google.com/thumbnail?id=${matchId[1]}&sz=w1200`;
+  }
+
+  // 不是 Google Drive 連結，原樣回傳
+  return url;
+}
     // ── 惡意代碼過濾 ──────────────────────────────────────────
     function sanitize(text) {
       return text
@@ -394,7 +412,7 @@
           card.style.transform = `rotate(${rotation}deg)`;
 
           const imgHtml = data.photoUrl
-            ? `<div class="polaroid-photo"><img src="${sanitize(data.photoUrl)}" alt="回憶照片" loading="lazy" onerror="this.parentElement.style.display='none'" /></div>`
+            ? `<div class="polaroid-photo"><img src="${sanitize(convertDriveUrl(data.photoUrl))}" alt="回憶照片" loading="lazy" onerror="this.parentElement.style.display='none'" /></div>`
             : `<div class="polaroid-photo polaroid-no-photo">📷</div>`;
 
           card.innerHTML = `

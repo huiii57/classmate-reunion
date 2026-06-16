@@ -188,79 +188,150 @@ function convertDriveUrl(url) {
     }
 
     // ══════════════════════════════════════════════════════════
-    // 【漂浮泡泡 🫧】
+    // 【漂浮泡泡 🫧 — Firebase 即時同步】
     // ══════════════════════════════════════════════════════════
 
-    function launchBubble() {
-      if (bubbleCount >= 100) return;
+    const BUBBLE_MAX = 100;
+    const LANTERN_MAX = 10;
+
+    // 發射泡泡：寫入 Firebase
+    async function launchBubble() {
+      if (bubbleCount >= BUBBLE_MAX) return;
+
+      const size = 20 + Math.random() * 50;
+      const startXPct = Math.random() * 90; // 用百分比避免解析度差異
+      const driftX = (Math.random() - 0.5) * 200;
+      const duration = 4000 + Math.random() * 4000;
+
+      await addDoc(collection(db, "bubbles"), {
+        size, startXPct, driftX, duration,
+        createdAt: serverTimestamp(),
+        expiresAt: Date.now() + duration + 500
+      });
+    }
+
+    // 在畫面上繪製一顆泡泡（由 onSnapshot 觸發）
+    function renderBubble(docId, data) {
+      if (document.getElementById("bubble-" + docId)) return; // 防重複
+      if (bubbleCount >= BUBBLE_MAX) return;
+
+      // 計算剩餘存活時間（讓晚加入的使用者看到泡泡從正確位置繼續飛）
+      const { size, startXPct, driftX, duration, expiresAt } = data;
+      const createdAtMs = expiresAt - duration - 500;
+      const elapsed = Math.max(0, Date.now() - createdAtMs);
+      const remainingMs = duration - elapsed;
+      if (remainingMs <= 300) return; // 剩餘不足 300ms 直接跳過
+
       bubbleCount++;
       updateBubbleBtn();
 
       const container = document.getElementById("bubble-container");
       const bubble = document.createElement("div");
       bubble.className = "bubble";
-
-      const size = 20 + Math.random() * 50;
-      const startX = Math.random() * (container.offsetWidth - size);
-      const driftX = (Math.random() - 0.5) * 200;
-      const duration = 4000 + Math.random() * 4000;
+      bubble.id = "bubble-" + docId;
 
       bubble.style.cssText = `
         width: ${size}px;
         height: ${size}px;
-        left: ${startX}px;
+        left: ${startXPct}%;
         bottom: 0;
         --drift-x: ${driftX}px;
-        animation-duration: ${duration}ms;
+        animation-duration: ${remainingMs}ms;
+        animation-delay: 0ms;
       `;
-
       container.appendChild(bubble);
 
       setTimeout(() => {
         bubble.remove();
         bubbleCount--;
         updateBubbleBtn();
-      }, duration);
+        deleteDoc(doc(db, "bubbles", docId)).catch(() => {});
+      }, remainingMs);
+    }
+
+    // 監聽泡泡（全域，不限場次）
+    function listenBubbles() {
+      // 只抓最近 2 分鐘的泡泡，避免舊資料堆積
+      const cutoff = Date.now() - 120000;
+      const q = query(collection(db, "bubbles"), where("expiresAt", ">", cutoff));
+      onSnapshot(q, (snap) => {
+        snap.docChanges().forEach(change => {
+          if (change.type === "added") {
+            renderBubble(change.doc.id, change.doc.data());
+          }
+        });
+      });
     }
 
     function updateBubbleBtn() {
-      const btn = document.getElementById("bubble-btn");
-      if (!btn) return;
-      if (bubbleCount >= 100) {
-        btn.disabled = true;
-        btn.textContent = "🫧 泡泡已滿";
-      } else {
-        btn.disabled = false;
-        btn.textContent = "🫧 發射泡泡";
-      }
+      document.querySelectorAll(".bubble-launch-btn").forEach(btn => {
+        if (bubbleCount >= BUBBLE_MAX) {
+          btn.disabled = true;
+          btn.textContent = "🫧 泡泡已滿";
+        } else {
+          btn.disabled = false;
+          btn.textContent = "🫧 發射泡泡";
+        }
+      });
     }
 
     // ══════════════════════════════════════════════════════════
-    // 【深夜天燈 🏮】
+    // 【深夜天燈 🏮 — Firebase 即時同步，速度慢 2 倍，上限 10 盞】
     // ══════════════════════════════════════════════════════════
 
+    // 從任一輸入來源讀取天燈資料後發射（寫入 Firebase）
+    async function launchLanternFrom(nameId, contentId) {
+      if (lanternCount >= LANTERN_MAX) {
+        alert(`天燈已達上限 ${LANTERN_MAX} 盞，請稍後再試！`);
+        return;
+      }
+      const name = document.getElementById(nameId).value.trim().slice(0, 10);
+      const content = document.getElementById(contentId).value.trim().slice(0, 30);
+      if (!name || !content) { alert("請填寫名字與天燈心願！"); return; }
+
+      const startXPct = 10 + Math.random() * 70;
+      const driftX = (Math.random() - 0.5) * 150;
+      // 天燈動畫時長 = 泡泡平均值 (6s) × 2 = 20 秒
+      const duration = 20000;
+
+      await addDoc(collection(db, "lanterns"), {
+        name, content, startXPct, driftX, duration,
+        createdAt: serverTimestamp(),
+        expiresAt: Date.now() + duration + 500
+      });
+
+      document.getElementById(nameId).value = "";
+      document.getElementById(contentId).value = "";
+    }
+
+    // 手機端天燈
     function launchLantern() {
-      if (lanternCount >= 30) {
-        alert("天燈已達上限 30 盞，請稍後再試！");
-        return;
-      }
+      launchLanternFrom("lantern-name", "lantern-content");
+    }
 
-      const name = document.getElementById("lantern-name").value.trim().slice(0, 10);
-      const content = document.getElementById("lantern-content").value.trim().slice(0, 30);
+    // 電腦端天燈
+    function launchLanternDesktop() {
+      launchLanternFrom("lantern-name-desktop", "lantern-content-desktop");
+    }
 
-      if (!name || !content) {
-        alert("請填寫名字與天燈內容！");
-        return;
-      }
+    // 在畫面上繪製一盞天燈（由 onSnapshot 觸發）
+    function renderLantern(docId, data) {
+      if (document.getElementById("lantern-" + docId)) return;
+      if (lanternCount >= LANTERN_MAX) return;
+
+      const { name, content, startXPct, driftX, duration, expiresAt } = data;
+      const createdAtMs = expiresAt - duration - 500;
+      const elapsed = Math.max(0, Date.now() - createdAtMs);
+      const remainingMs = duration - elapsed;
+      if (remainingMs <= 300) return; // 剩餘不足 300ms 直接跳過
 
       lanternCount++;
+      updateLanternBtn();
 
       const container = document.getElementById("lantern-container");
       const lantern = document.createElement("div");
       lantern.className = "lantern";
-
-      const startX = 10 + Math.random() * 70;
-      const driftX = (Math.random() - 0.5) * 150;
+      lantern.id = "lantern-" + docId;
 
       lantern.innerHTML = `
         <div class="lantern-body">
@@ -271,21 +342,46 @@ function convertDriveUrl(url) {
           </div>
         </div>
       `;
-
       lantern.style.cssText = `
-        left: ${startX}%;
+        left: ${startXPct}%;
         --drift-x: ${driftX}px;
+        animation-duration: ${remainingMs}ms;
+        animation-delay: 0ms;
       `;
-
       container.appendChild(lantern);
-
-      document.getElementById("lantern-name").value = "";
-      document.getElementById("lantern-content").value = "";
 
       setTimeout(() => {
         lantern.remove();
         lanternCount--;
-      }, 10000);
+        updateLanternBtn();
+        deleteDoc(doc(db, "lanterns", docId)).catch(() => {});
+      }, remainingMs);
+    }
+
+    // 監聽天燈（全域）
+    function listenLanterns() {
+      const cutoff = Date.now() - 25000;
+      const q = query(collection(db, "lanterns"), where("expiresAt", ">", cutoff));
+      onSnapshot(q, (snap) => {
+        snap.docChanges().forEach(change => {
+          if (change.type === "added") {
+            renderLantern(change.doc.id, change.doc.data());
+          }
+        });
+      });
+    }
+
+    function updateLanternBtn() {
+      const full = lanternCount >= LANTERN_MAX;
+      const btns = [
+        document.getElementById("launch-lantern-btn"),
+        document.getElementById("launch-lantern-desktop-btn")
+      ];
+      btns.forEach(btn => {
+        if (!btn) return;
+        btn.disabled = full;
+        btn.textContent = full ? "🏮 天燈已滿" : "🏮 放飛天燈";
+      });
     }
 
     // ══════════════════════════════════════════════════════════
@@ -701,13 +797,22 @@ function convertDriveUrl(url) {
       // 時光牆投稿
       document.getElementById("submit-wall-btn").addEventListener("click", submitWall);
 
-      // 天燈發射
-      document.getElementById("launch-lantern-btn").addEventListener("click", launchLantern);
+      // 天燈發射（手機端）
+      const mLanternBtn = document.getElementById("launch-lantern-btn");
+      if (mLanternBtn) mLanternBtn.addEventListener("click", launchLantern);
+
+      // 天燈發射（電腦端）
+      const dLanternBtn = document.getElementById("launch-lantern-desktop-btn");
+      if (dLanternBtn) dLanternBtn.addEventListener("click", launchLanternDesktop);
 
       // 泡泡發射（手機端與電腦端共用函數）
       document.querySelectorAll(".bubble-launch-btn").forEach(btn => {
         btn.addEventListener("click", launchBubble);
       });
+
+      // 開始監聽同步泡泡 & 天燈
+      listenBubbles();
+      listenLanterns();
 
       // 新增場次（管理員）
       const createBtn = document.getElementById("create-session-btn");
@@ -1222,19 +1327,18 @@ function convertDriveUrl(url) {
     /* 向下滾動提示 */
     .scroll-hint {
       position: absolute;
-      bottom: 60px;
-      left: 50%;
-      transform: translateX(-50%);
+      bottom: 16px;
+      right: 20px;
       text-align: center;
       color: var(--text-dim);
-      font-size: 1rem;
+      font-size: 0.9rem;
       animation: bounce 2s ease-in-out infinite;
       pointer-events: none;
       z-index: 10;
     }
     @keyframes bounce {
-      0%, 100% { transform: translateX(-50%) translateY(0); }
-      50% { transform: translateX(-50%) translateY(8px); }
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(8px); }
     }
 
     /* ═══════════════════════════════════════════════════════
@@ -1818,23 +1922,12 @@ function convertDriveUrl(url) {
       <button class="btn-primary" id="launch-lantern-btn" style="width:100%;">🏮 放飛天燈</button>
     </div>
 
-    <!-- 備忘錄投稿 -->
-    <div class="remote-card">
-      <div class="remote-card-title">📌 貼備忘錄</div>
-      <input class="input-field" id="memo-name-m" placeholder="你的名字" style="margin-bottom:8px;" />
-      <input class="input-field" id="memo-pin-m" placeholder="4位數PIN碼" type="password" maxlength="4" pattern="\d{4}" style="margin-bottom:8px;" />
-      <textarea class="input-field" id="memo-content-m" placeholder="備忘錄內容（可貼網址）" rows="3" style="margin-bottom:10px;resize:vertical;"></textarea>
-      <button class="btn-primary" id="submit-memo-m-btn" style="width:100%;">📌 貼上去</button>
-    </div>
-
-    <!-- 時光牆投稿 -->
-    <div class="remote-card">
-      <div class="remote-card-title">🖼️ 貼時光牆</div>
-      <input class="input-field" id="wall-name-m" placeholder="你的名字" style="margin-bottom:8px;" />
-      <input class="input-field" id="wall-pin-m" placeholder="4位數PIN碼" type="password" maxlength="4" pattern="\d{4}" style="margin-bottom:8px;" />
-      <textarea class="input-field" id="wall-content-m" placeholder="寫下回憶..." rows="2" style="margin-bottom:8px;resize:vertical;"></textarea>
-      <input class="input-field" id="wall-photo-m" placeholder="照片網址（選填）" style="margin-bottom:10px;" />
-      <button class="btn-primary" id="submit-wall-m-btn" style="width:100%;">🖼️ 貼上去</button>
+    <!-- 備忘錄投稿（隱藏的橋接欄位，邏輯仍保留但 UI 移至下方 section） -->
+    <div style="display:none;">
+      <input id="memo-name-m" /><input id="memo-pin-m" /><textarea id="memo-content-m"></textarea>
+      <button id="submit-memo-m-btn"></button>
+      <input id="wall-name-m" /><input id="wall-pin-m" /><textarea id="wall-content-m"></textarea>
+      <input id="wall-photo-m" /><button id="submit-wall-m-btn"></button>
     </div>
   </div>
 
@@ -1891,13 +1984,27 @@ function convertDriveUrl(url) {
         <label><input type="radio" name="scene-radio" value="rainwindow" /> 🌧️ 微雨天窗小屋</label>
       </div>
 
-      <!-- 電腦端泡泡按鈕 -->
-      <button class="btn-primary bubble-launch-btn" id="desktop-bubble-btn" style="position:absolute;bottom:80px;left:50%;transform:translateX(-50%);min-width:140px;">
-        🫧 發射泡泡
-      </button>
+      <!-- 電腦端泡泡 & 天燈按鈕 -->
+      <div id="desktop-action-bar" style="position:absolute;bottom:16px;left:50%;transform:translateX(-50%);display:flex;flex-direction:row;align-items:flex-end;gap:16px;z-index:20;">
+        <!-- 泡泡區塊 -->
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+          <button class="btn-primary bubble-launch-btn" id="desktop-bubble-btn" style="min-width:130px;">
+            🫧 發射泡泡
+          </button>
+          <span style="color:var(--text-dim);font-size:0.78rem;">所有人都看得到</span>
+        </div>
+
+        <!-- 天燈區塊 -->
+        <div id="desktop-lantern-panel" style="background:rgba(10,6,2,0.75);border:1px solid rgba(255,170,50,0.45);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;width:260px;backdrop-filter:blur(8px);">
+          <div style="color:var(--warm-amber);font-size:0.95rem;text-align:center;letter-spacing:0.1em;">🏮 放飛天燈（同步給所有人）</div>
+          <input class="input-field" id="lantern-name-desktop" placeholder="你的名字（最多10字）" maxlength="10" style="font-size:0.9rem;padding:8px 12px;" />
+          <input class="input-field" id="lantern-content-desktop" placeholder="天燈心願（最多30字）" maxlength="30" style="font-size:0.9rem;padding:8px 12px;" />
+          <button class="btn-primary" id="launch-lantern-desktop-btn" style="width:100%;">🏮 放飛天燈</button>
+        </div>
+      </div>
 
       <!-- 向下提示 -->
-      <div class="scroll-hint">↓ 向下探索 ↓</div>
+      <div class="scroll-hint" style="bottom:8px;">↓ 向下探索 ↓</div>
 
     </div>
   </div>

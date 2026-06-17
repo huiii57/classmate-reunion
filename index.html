@@ -251,8 +251,8 @@ function convertDriveUrl(url) {
 
     // 監聽泡泡（全域，不限場次）
     function listenBubbles() {
-      // 只抓最近 2 分鐘的泡泡，避免舊資料堆積
-      const cutoff = Date.now() - 120000;
+      // 只抓「現在還沒過期」的泡泡，頁面剛開啟時不會重播已結束的舊泡泡
+      const cutoff = Date.now();
       const q = query(collection(db, "bubbles"), where("expiresAt", ">", cutoff));
       onSnapshot(q, (snap) => {
         snap.docChanges().forEach(change => {
@@ -276,7 +276,7 @@ function convertDriveUrl(url) {
     }
 
     // ══════════════════════════════════════════════════════════
-    // 【深夜天燈 🏮 — Firebase 即時同步，速度慢 2 倍，上限 10 盞】
+    // 【深夜天燈 🏮 — Firebase 即時同步，速度為泡泡的一半，上限 10 盞】
     // ══════════════════════════════════════════════════════════
 
     // 從任一輸入來源讀取天燈資料後發射（寫入 Firebase）
@@ -291,8 +291,8 @@ function convertDriveUrl(url) {
 
       const startXPct = 10 + Math.random() * 70;
       const driftX = (Math.random() - 0.5) * 150;
-      // 天燈動畫時長 = 泡泡平均值 (6s) × 2 = 20 秒
-      const duration = 20000;
+      // 泡泡時長為 4000~8000ms（隨機），天燈速度要慢 2 倍 → 時長乘以 2 = 8000~16000ms
+      const duration = (4000 + Math.random() * 4000) * 2;
 
       await addDoc(collection(db, "lanterns"), {
         name, content, startXPct, driftX, duration,
@@ -360,7 +360,8 @@ function convertDriveUrl(url) {
 
     // 監聽天燈（全域）
     function listenLanterns() {
-      const cutoff = Date.now() - 25000;
+      // 只抓「現在還沒過期」的天燈，頁面剛開啟時不會重播已結束的舊天燈
+      const cutoff = Date.now();
       const q = query(collection(db, "lanterns"), where("expiresAt", ">", cutoff));
       onSnapshot(q, (snap) => {
         snap.docChanges().forEach(change => {
@@ -1162,7 +1163,7 @@ function convertDriveUrl(url) {
     .lantern {
       position: absolute;
       bottom: 15%;
-      animation: lanternRise 10s ease-out forwards;
+      animation: lanternRise ease-out forwards;
     }
     @keyframes lanternRise {
       0% { transform: translateY(0) translateX(0); opacity: 0.9; }
